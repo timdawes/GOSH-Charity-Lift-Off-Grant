@@ -1,0 +1,223 @@
+# GOSH Charity Lift Off Grants: Discovery Grant March 2026
+
+
+# Libraries
+    library(ggplot2)
+
+# Functions
+
+        boot_power_ci <- function(pass, B = 5000, conf = 0.95) {
+          pass <- as.numeric(pass)
+          pass <- pass[is.finite(pass)]
+          n <- length(pass)
+          stopifnot(n > 1)
+          
+          boots <- replicate(B, mean(sample(pass, n, replace = TRUE)))
+          alpha <- (1 - conf) / 2
+          qs <- quantile(boots, c(alpha, 1 - alpha), na.rm = TRUE)
+          
+          c(lower = qs[1], upper = qs[2])
+        }
+        
+        wilson_ci <- function(x, n, conf = 0.95) {
+          if (is.na(x) || is.na(n) || n <= 0) {
+            return(c(lower = NA_real_, upper = NA_real_))
+          }
+          
+          alpha <- 1 - conf
+          z <- qnorm(1 - alpha / 2)
+          
+          phat <- x / n
+          z2 <- z^2
+          
+          denom  <- 1 + z2 / n
+          center <- (phat + z2 / (2 * n)) / denom
+          half   <- (z * sqrt(phat * (1 - phat) / n + z2 / (4 * n^2))) / denom
+          
+          out <- c(lower = center - half, upper = center + half)
+          
+          # keep within [0, 1]
+          out["lower"] <- max(0, out["lower"])
+          out["upper"] <- min(1, out["upper"])
+          
+          out
+        }
+        
+        
+        sim_power_sens <- function(
+            n_pos,
+            p_true = 0.95,
+            prevalence = 0.95,
+            nsim = 4000,
+            conf = 0.95,
+            target_sens = 0.90,
+            precision = 0.01
+        ) {
+          x <- rbinom(nsim, size = n_pos, prob = p_true)
+          phat <- x / n_pos
+          
+          ci <- t(mapply(wilson_ci, x = x, MoreArgs = list(n = n_pos, conf = conf)))
+          half_width <- (ci[, "upper"] - ci[, "lower"]) / 2
+          
+          pass <- (ci[, "lower"] >= target_sens) & (half_width <= precision)
+          
+          # power CI (Wilson)
+          pwr_ci <- boot_power_ci(pass, B = 1000, conf = conf)
+          
+          data.frame(
+            n_pos = n_pos,
+            total_n = ceiling(n_pos / prevalence),
+            power = mean(pass),
+            power_lo = pwr_ci["lower.2.5%"],
+            power_hi = pwr_ci["upper.97.5%"],
+            mean_halfwidth = mean(half_width)
+          )
+        }
+
+
+# Run bootstrap
+
+        set.seed(1)
+        prevalence <- 0.95
+        n_pos_grid <- unique(round(seq(1000, 2500, length.out = 200)))
+        pb <- txtProgressBar(min = 0, max = length(n_pos_grid), style = 3)
+        res_list <- vector("list", length(n_pos_grid))
+        
+        
+        for (i in seq_along(n_pos_grid)) {
+          res_list[[i]] <- sim_power_sens(
+            n_pos = n_pos_grid[i],
+            p_true = 0.95,
+            prevalence = prevalence,
+            nsim = 4000,
+            target_sens = 0.90,
+            precision = 0.01
+          )
+          setTxtProgressBar(pb, i)
+        }
+        
+        close(pb)
+        
+        res <- do.call(rbind, res_list)
+        
+        power_threshold <- 0.8
+        idx <- which(res$power >= power_threshold)[1]
+        n_total_required <- res$total_n[idx]
+        
+        precision_threshold<-0.02
+        idx2 <- which(res$mean_halfwidth <= precision_threshold/2)[1]
+        n_total_required2 <- res$total_n[idx2]
+
+
+
+# Draw results
+# ------------
+# Scaling so precision line fits nicely in the same plot window
+# (maps 0..max(precision) onto 0.90..1.00 range by default)
+
+
+# scale precision onto power axis
+        power_min <- 0
+        power_max <- 1
+        prec_max <- max(res$mean_halfwidth, na.rm = TRUE)
+        
+        k <- (power_max - power_min) / prec_max
+        b <- power_min
+        y_prec_right <- b + k * 0.01
+        col_blue<- rgb(37/255,64/255,119/255)
+
+# Draw figure
+        ggplot(res, aes(x = total_n)) +
+          # power CI ribbon
+                geom_ribbon(aes(ymin = power_lo, ymax = power_hi, group = 1), linewidth = 3, alpha = 0.5) +
+          # mean power
+                geom_point(aes(y = power)) +
+                geom_smooth(aes(y = power, group = 1), method = "loess", se = FALSE, span=0.2) +
+          # precision curve (mapped)
+                geom_line(aes(y = b + k * mean_halfwidth), linewidth = 3, col="red") +
+          # reference lines
+                geom_hline(yintercept = power_threshold, linetype = "dashed", col=col_blue, linewidth = 2) +
+                geom_vline(xintercept = n_total_required, linetype = "dashed", col=col_blue, linewidth = 2) +
+                
+                geom_hline(yintercept = y_prec_right, linetype = "dashed", col="red", linewidth = 2) +
+                geom_vline(xintercept = n_total_required2, linetype = "dashed", col="red", linewidth = 2) +
+          
+          # --- existing power annotation ---
+          # annotate(
+          #   "text",
+          #   x = 1000,
+          #   y = power_threshold,
+          #   label = sprintf("Power*' \u2265 '*%.3f*','~~N*' \u2248 '*%d",
+          #                   power_threshold, n_total_required),
+          #   hjust = 0,
+          #   vjust = -0.2,
+          #   size = 6,
+          #   parse = TRUE
+          # ) +
+          # 
+          # # --- NEW precision annotation (mapped to left axis!) ---
+          # annotate(
+          #   "text",
+          #   x = 1000,
+          #   y = y_prec_right,
+          #   label = sprintf("Power*' \u2265 '*%.3f*','~~N*' \u2248 '*%d",
+          #                   power_threshold, n_total_required),
+          #   label = sprintf("Precision*' \u2264 '*%.3f*','~~N*' \u2248 '*%d",
+          #                   precision_threshold/2, n_total_required2),
+          #   hjust = 0,
+          #   vjust = 1.2,
+          #   size = 6,
+          #   parse = TRUE
+          # ) +
+
+          # labs(
+          #   x = "Total test set size (reports)",
+          #   y = expression(atop(
+          #     Power~to~demonstrate,
+          #     ~"\u2265"~95*"% sensitivity (±1% precision)"
+          #   ))
+          # ) +
+          # scale_y_continuous(
+          #    sec.axis = sec_axis(
+          #      trans = ~ (. - b) / k,
+          #      name = "Precision\n (95% CI half-width for sensitivity)"
+          #    )
+          # ) +
+          labs(
+            x = "",
+            y = ""
+            ) +
+          scale_y_continuous(
+             sec.axis = sec_axis(
+               trans = ~ 100 * (. - b) / k,
+               name = ""
+             )
+          ) +
+
+          
+          coord_cartesian(ylim = c(0,1)) + theme_bw() +
+           theme(
+                  # ---- Text sizes ----
+                axis.title = element_text(size = 14),
+                axis.text  = element_text(size = 16),
+                
+                # ---- Left Y axis (blue) ----
+                axis.title.y.left  = element_text(color = col_blue),
+                axis.text.y.left   = element_text(color = col_blue),
+                axis.ticks.y.left  = element_line(color = col_blue),
+                axis.line.y.left   = element_line(color = col_blue, linewidth = 3),
+                
+                # ---- Right Y axis (red) ----
+                axis.title.y.right = element_text(color = "red"),
+                axis.text.y.right  = element_text(color = "red"),
+                axis.ticks.y.right = element_line(color = "red"),
+                axis.line.y.right  = element_line(color = "red", linewidth = 3),
+                
+                # ---- X axis (black & thicker) ----
+                axis.line.x.bottom = element_line(color = "black", linewidth = 3),
+                axis.ticks.x.bottom = element_line(color = "black"),
+                
+                # ---- Remove top border ----
+                axis.line.x.top = element_blank(),
+                panel.border = element_blank()   # removes full box from theme_bw()
+                )
